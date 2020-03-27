@@ -1,0 +1,107 @@
+############################################################################################################################
+######################################## Transforming USAFacts County Level Data ########################################### 
+############################################################################################################################
+# Script for taking USAFacts county-level dataset, adding lat/long coordinates for each county, and transforming datasheet
+# into NECSI time-series format
+
+# Only one required package:
+library(readr)
+
+#### Set working directory ####
+# Make sure to set to whatever folder you would like to write output to
+setwd("~/Documents/Data_and_Projects/NECSI-COVID19/Data/USA_CountyLevel")
+
+#### Load data ####
+### USAFacts
+cases_url <- "https://static.usafacts.org/public/data/covid-19/covid_confirmed_usafacts.csv?_ga=2.104843072.1960452769.1585151006-660813358.1585151006"
+covid_usa_cases <- read_csv(url(cases_url))
+
+deaths_url <- "https://static.usafacts.org/public/data/covid-19/covid_deaths_usafacts.csv?_ga=2.62244076.1960452769.1585151006-660813358.1585151006"
+covid_usa_deaths <- read_csv(url(deaths_url))
+
+### Dataset with lat/long county coordinates 
+county_latlong_url <- "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_daily_reports/03-24-2020.csv"
+county_latlong <- read_csv(url(county_latlong_url))
+
+### Get rid of " County" suffix from counties
+covid_usa_cases$`County Name` <- gsub(" County", "", covid_usa_cases$`County Name`, fixed = T)
+covid_usa_deaths$`County Name` <- gsub(" County", "", covid_usa_cases$`County Name`, fixed = T)
+
+### Change Alaska municipality, borough, etc names to match lat/long dataset
+AK_current <- c("Municipality of Anchorage" , "Fairbanks North Star Borough", "City and Borough of Juneau",  
+                "Kenai Peninsula Borough" , "Ketchikan Gateway Borough" , "Matanuska-Susitna Borough")
+
+AK_corrected <- c("Anchorage", "Fairbanks North Star", "Juneau", "Kenai Peninsula", "Ketchikan Gateway", "Matanuska-Susitna")
+
+for (i in 1:length(AK_current)){
+  hit <- which(covid_usa_cases$`County Name` == AK_current[i])
+  covid_usa_cases$`County Name`[hit] <- AK_corrected[i]
+}
+
+### Change state names to abbreviations in latlong dataframe
+county_latlong$Province_State <- state.abb[match(county_latlong$Province_State, state.name)]
+
+### Separate case/death counts data for easier loop coding below
+cases <- covid_usa_cases[5:ncol(covid_usa_cases)]
+deaths <- covid_usa_deaths[5:ncol(covid_usa_cases)]
+
+#### Create empty NECSI-formatted datasets to populate with transformed data ####
+### One empty data frame serves as final master sheet
+### Other data frame is populated with information for each county which is then appended to the master sheet
+covid19_usa_NECSI <- data.frame(matrix(ncol = 14, nrow = 0))
+colnames(covid19_usa_NECSI) <- c("date", "county", "county_FIPS", "state", "country", "lat/long", "confirmed", "recovered", 
+                                "dead", "daily_diff_confirm", "daily_diff_recover", "daily_diff_dead", "admin_level", 
+                                "source")
+county_NECSI <- covid19_usa_NECSI
+
+#### Loops for populating NECSI time series-formatted data frame ####
+### Outer loop cycles through counties, inner loop populates relevant information for each county for each date available
+### in the USAFacts data sheet
+for (k in 1:length(covid_usa_cases$`County Name`)){
+
+for (i in 1:ncol(cases)){
+  day <- colnames(cases)[i]
+  county <- as.character(covid_usa_cases[k, 2])
+  countyFIPS <- as.character(covid_usa_cases[k, 1])
+  state <- as.character(covid_usa_cases[k, 3])
+  
+county_NECSI[i, 1] <- day
+county_NECSI[i, 2] <- county
+county_NECSI[i, 3] <- countyFIPS
+county_NECSI[i, 4] <- state
+
+# Find matching row with relevant county lat/lon information if county is not "Statewide Unallocated" and associate 
+# relevant lat/long coordinates
+if (county == "Statewide Unallocated"){
+  county_NECSI[i, 6] <- NA # Can be replaced with state-wide lat/long?
+} else {
+county_match <- which(county_latlong$Admin2 == county & county_latlong$Province_State == state)
+county_NECSI[i, 6] <- paste(county_latlong$Lat[county_match], "/", county_latlong$Long_[county_match], sep = "")
+}
+
+county_NECSI[i, 7] <- cases[k,i]
+# No data in USAFacts for number of recovered, cell [i, 10] skipped
+county_NECSI[i, 9] <- deaths[k, i]
+if (day == "1/22/2020"){
+  county_NECSI[i, 10] <- county_NECSI[i, 7]
+} else {
+  county_NECSI[i, 10] <- county_NECSI[i, 7] - county_NECSI[i-1, 7]
+}
+# No data for number recovered, cell [i, 10] skipped
+if (day == "1/22/2020"){
+  county_NECSI[i, 12] <- county_NECSI[i, 9]
+} else {
+  county_NECSI[i, 12] <- county_NECSI[i, 9] - county_NECSI[i-1, 9]
+}
+}
+  # Bind county information to master sheet
+    covid19_usa_NECSI <- rbind(covid19_usa_NECSI, county_NECSI)
+}
+
+#### Populate country, admin level, and source columns in final data frame ####
+covid19_usa_NECSI$country <- "USA"
+covid19_usa_NECSI$admin_level <- 1
+covid19_usa_NECSI$source <- "USAFacts"
+
+#### Write output ####
+write.csv(covid19_usa_NECSI, file = "COVID19_USA_County_TimeSeries.csv")
